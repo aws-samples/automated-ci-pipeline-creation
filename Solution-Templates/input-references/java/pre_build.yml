@@ -1,0 +1,13 @@
+# Represents the commands, if any, that CodeBuild runs before the build.
+# © 2023 Amazon Web Services, Inc. or its affiliates. All Rights Reserved.  
+# This AWS Content is provided subject to the terms of the AWS Customer Agreement available at  
+# http://aws.amazon.com/agreement or other written agreement between Customer and either
+# Amazon Web Services, Inc. or Amazon Web Services EMEA SARL or both.
+
+  pre_build:
+    commands:
+    - echo Pre-Build steps Started
+    - mvn test #-f surefire/pom.xml -fn
+    - echo
+    - mvn verify
+    - echo ********* Pre-Build steps finished *********
