@@ -1,23 +1,21 @@
-# This code launches the pipeline resources i.e., codecommit repository, codebuild project and code pipeline.
-# ? 2023 Amazon Web Services, Inc. or its affiliates. All Rights Reserved.
-# This AWS Content is provided subject to the terms of the AWS Customer Agreement available at  
-# http://aws.amazon.com/agreement or other written agreement between Customer and either
-# Amazon Web Services, Inc. or Amazon Web Services EMEA SARL or both.
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 
+# This code launches the pipeline resources i.e., codecommit repository, codebuild project and code pipeline.
 AWSTemplateFormatVersion: 2010-09-09
 Description: Creation of codecommit repository, Codebuild Project and CodePipeline
 Parameters:
   ProjectName:
     Description: The name of the project for which pipelines are to be created by the master pipeline.
     Type: String
+    AllowedPattern: ^[A-Za-z0-9-]{1,40}$
+    ConstraintDescription: Use 1 to 40 letters, numbers or hyphens.
   TechStack:
-    Description: The technology stack of the project for which pipelines are to be created by the master pipeline. e.g. java, cloudformation
+    Description: The technology stack of the project for which pipelines are to be created by the master pipeline.
     Type: String
     AllowedValues:
       - java
-      - cloudformation
       - python
-      - terraform
 Resources:
   CodeRepository:
     Type: 'AWS::CodeCommit::Repository'
@@ -53,17 +51,19 @@ Resources:
         - - !Ref 'ProjectName'
           - 'Build'
       ServiceRole: '{{resolve:ssm:CodeBuildRoleARN}}'
-      EncryptionKey: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3'
+      EncryptionKey: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3'
       Artifacts:
         Type: CODEPIPELINE
       Environment:
         ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        Image: aws/codebuild/amazonlinux-x86_64-standard:5.0
         Type: LINUX_CONTAINER
         EnvironmentVariables:
           - Name: BUILD_ARTIFACT_BUCKET
+            Type: PLAINTEXT
             Value: '{{resolve:ssm:DeploymentArtifactBucketName}}'
           - Name: TECH_STACK
+            Type: PLAINTEXT
             Value: !Ref TechStack
       Source:
         Type: CODEPIPELINE

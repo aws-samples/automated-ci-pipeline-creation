@@ -1,28 +1,60 @@
-# This code launches the solution resources for CI pipeline creation i.e., State Machine, DynamoDB table, Lambda Function, IAM Roles& Policies.
-# ? 2023 Amazon Web Services, Inc. or its affiliates. All Rights Reserved.
-# This AWS Content is provided subject to the terms of the AWS Customer Agreement available at
-# http://aws.amazon.com/agreement or other written agreement between Customer and either
-# Amazon Web Services, Inc. or Amazon Web Services EMEA SARL or both.
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 
+# This code launches the solution resources for CI pipeline creation i.e., State Machine, DynamoDB table, Lambda Function, IAM Roles & Policies.
 AWSTemplateFormatVersion: 2010-09-09
-Description: Creation of Lambda Function, Step Function and S3 Bucket along with required IAM roles& Policies.
+Description: Creation of Lambda Function, Step Function and DynamoDB table along with required IAM roles & policies.
 Parameters:
   S3TemplateBucketName:
     Type: String
     Description: The name of the S3 bucket which has the source code and references. BucketName should be in lowercase.
+    AllowedPattern: ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$
+    ConstraintDescription: Must be a valid, lowercase S3 bucket name.
   StateMachineName:
     Type: String
     Description: The name of the state machine.
     Default: "statemachine-ci-pipelinecreation"
+    AllowedPattern: ^[A-Za-z0-9_-]{1,80}$
   DynamoDBTable:
     Type: String
     Description: The name of the DynamoDB Table.
     Default: "DynamoDB-pipelinecreation"
+    AllowedPattern: ^[A-Za-z0-9_.-]{3,255}$
 
 Resources:
+  # Customer managed key for the DynamoDB table and the state machine log group.
+  SolutionKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Encrypts the pipeline creation DynamoDB table and state machine logs
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+          - Sid: AllowCloudWatchLogsForTheStateMachineLogGroup
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: "*"
+            Condition:
+              ArnEquals:
+                kms:EncryptionContext:aws:logs:arn: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/states/${StateMachineName}"
+
   DynamoDBTableStateMachine:
     Type: AWS::DynamoDB::Table
-    #checkov:skip=CKV_AWS_119:Enabled default server side encryption
     Metadata:
       cfn_nag:
         rules_to_suppress:
@@ -30,7 +62,7 @@ Resources:
             reason: Explicit names are used for the dynamodb table.
     Properties:
       PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: True
+        PointInTimeRecoveryEnabled: true
       BillingMode: "PROVISIONED"
       AttributeDefinitions:
         - AttributeName: "techstack"
@@ -47,39 +79,10 @@ Resources:
         WriteCapacityUnits: "5"
       SSESpecification:
         SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt SolutionKmsKey.Arn
       TableName: !Ref "DynamoDBTable"
       TableClass: "STANDARD"
-
-
-  AWSLambdaPolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Action:
-              - s3:ListAllMyBuckets
-              - s3:ListBucket
-            Effect: Allow
-            Resource: !Join
-            - ''
-            - - 'arn:aws:s3:::'
-              - !Ref S3TemplateBucketName
-          - Action:
-              - s3:ListAllMyBuckets
-              - s3:ListBucket
-              - s3:GetBucketLocation
-              - s3:PutObject
-              - s3:GetObject
-              - s3:GetObjectVersion
-            Effect: Allow
-            Resource: !Join
-            - ''
-            - - 'arn:aws:s3:::'
-              - !Ref S3TemplateBucketName
-              - /*
-      Roles:
-        - !Ref "AWSLambdaRole"
 
   AWSLambdaRole:
     Type: AWS::IAM::Role
@@ -92,233 +95,41 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AWSXrayWriteOnlyAccess"
 
-  ListResourcesPolicy:
+  # The function reads the buildspec fragments and the sample code, and writes the generated files.
+  AWSLambdaPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       Roles:
-        - !Ref "StateMachineRole"
+        - !Ref "AWSLambdaRole"
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Action:
-              - codepipeline:List*
-              - codepipeline:Get*
+          - Action: s3:ListBucket
+            Effect: Allow
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${S3TemplateBucketName}"
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - "samplecode/*"
+          - Action: s3:GetObject
             Effect: Allow
             Resource:
-              - !Sub "arn:aws:codepipeline:*:${AWS::AccountId}:webhook:*"
-              - !Sub "arn:aws:codepipeline:*:${AWS::AccountId}:actiontype:*/*/*/*"
-              - !Sub "arn:aws:codepipeline:*:${AWS::AccountId}:*/*/*"
-              - !Sub "arn:aws:codepipeline:*:${AWS::AccountId}:*"
-              - !Sub "arn:aws:codepipeline:*:${AWS::AccountId}:*/*"
-          - Action:
-              - logs:DescribeLogGroups
-              - logs:DescribeResourcePolicies
-              - logs:GetLogDelivery
-              - logs:ListLogDeliveries
-              - logs:GetLogEvents
+              - !Sub "arn:${AWS::Partition}:s3:::${S3TemplateBucketName}/input-references/*"
+              - !Sub "arn:${AWS::Partition}:s3:::${S3TemplateBucketName}/samplecode/*"
+          - Action: s3:PutObject
             Effect: Allow
-            Resource:
-              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
-              - "arn:aws:logs:*:*:log-group:/aws/codebuild/*:log-stream:*"
-          - Action:
-              - lambda:List*
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:*"
-          - Action:
-              - iam:List*
-              - iam:Get*
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:iam::${AWS::AccountId}:role/*"
-              - !Sub "arn:aws:iam::${AWS::AccountId}:policy/*"
-          - Action:
-              - s3:List*
-              - s3:Get*
-            Effect: Allow
-            Resource: !Join
-              - ''
-              - - 'arn:aws:s3:::'
-                - !Ref S3TemplateBucketName
-                - /*
-          - Action:
-              - codecommit:Get*
-              - codecommit:List*
-              - codecommit:BatchGetRepositories
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:*"
-          - Action:
-              - dynamodb:List*
-              - dynamodb:GetItem
-              - dynamodb:DescribeLimits
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:*"
-          - Action:
-              - cloudwatch:Describe*
-              - cloudwatch:GetMetricStatistics
-              - cloudwatch:ListMetrics
-              - cloudwatch:GetMetricData
-              - cloudwatch:GetInsightRuleReport
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:*"
-              - "arn:aws:cloudwatch:*:*:insight-rule/*"
-          - Action:
-              - ssm:ListDocumentVersions
-              - ssm:ListCommands
-              - ssm:ListAssociations
-              - ssm:Get*
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:*"
-              - "arn:aws:ssm:*:*:parameter/CodeBuild/*"
-          - Action:
-              - codebuild:DescribeTestCases
-              - codebuild:GetResourcePolicy
-              - codebuild:List*
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:*"
-          - Action:
-              - cloudformation:List*
-              - cloudformation:Describe*
-              - cloudformation:GetTemplateSummary
-              - cloudformation:GetStackPolicy
-              - cloudformation:GetTemplate
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${S3TemplateBucketName}/generated-artifacts/*"
 
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:*"
-
-  CodePipelineStateMachinePolicy:
+  # Used by the state machine itself: DynamoDB, Lambda and the CloudFormation API calls.
+  StateMachineWorkflowPolicy:
     Type: AWS::IAM::ManagedPolicy
-    Properties:
-      Roles:
-        - !Ref "StateMachineRole"
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Action:
-              - codepipeline:CreatePipeline
-              - codepipeline:PutJobFailureResult
-              - codepipeline:StartPipelineExecution
-              - codepipeline:PutJobSuccessResult
-              - codepipeline:AcknowledgeJob
-              - codepipeline:UpdatePipeline
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:codepipeline:*:${AWS::AccountId}:webhook:*"
-              - !Sub "arn:aws:codepipeline:*:${AWS::AccountId}:actiontype:*/*/*/*"
-              - !Sub "arn:aws:codepipeline:*:${AWS::AccountId}:*/*/*"
-              - !Sub "arn:aws:codepipeline:*:${AWS::AccountId}:*"
-              - !Sub "arn:aws:codepipeline:*:${AWS::AccountId}:*/*"
-
-  LambdaStateMachinePolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      Roles:
-        - !Ref "StateMachineRole"
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Action:
-              - logs:CreateLogDelivery
-              - logs:PutResourcePolicy
-              - logs:UpdateLogDelivery
-              - lambda:InvokeFunction
-              - lambda:CreateFunction
-              - lambda:CreateEventSourceMapping
-              - lambda:GetFunctionConfiguration
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
-              - "arn:aws:logs:*:*:log-group:/aws/codebuild/*:log-stream:*"
-              - !GetAtt AWSLambdaFunction.Arn
-          - Action:
-              - iam:AttachRolePolicy
-              - iam:CreatePolicy
-              - iam:PassRole
-              - iam:CreateRole
-              - iam:PutRolePolicy
-              - iam:PutRolePolicy
-              - iam:UpdateRole
-              - iam:UpdateRoleDescription
-              - iam:AttachUserPolicy
-              - iam:PutUserPolicy
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:iam::${AWS::AccountId}:role/Codebuild-Role-${AWS::Region}"
-              - !Sub "arn:aws:iam::${AWS::AccountId}:role/Codepipeline-Role-${AWS::Region}"
-              - !Sub "arn:aws:iam::${AWS::AccountId}:role/Pipeline-CFT-Role-${AWS::Region}"
-              - !Sub "arn:aws:iam::${AWS::AccountId}:policy/codebuild-policy-${AWS::Region}"
-              - !Sub "arn:aws:iam::${AWS::AccountId}:policy/codepipeline-policy-${AWS::Region}"
-          - Action:
-              - s3:CreateBucket
-              - s3:PutObject
-              - s3:PutBucketTagging
-              - s3:PutBucketAcl
-              - s3:PutObjectTagging
-              - s3:PutBucketVersioning
-              - s3:PutBucketPolicy
-              - s3:PutBucketPublicAccessBlock
-              - s3:PutPublicAccessBlock
-              - s3:PutEncryptionConfiguration
-            Effect: Allow
-            Resource:
-              - 'arn:aws:s3:::deployment-artifact-bucket*'
-              - 'arn:aws:s3:::deployment-artifact-bucket*/*'
-
-
-  LambdaStateMachinePolicyIAMRollback:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      Roles:
-        - !Ref "StateMachineRole"
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Action:
-              - iam:DeleteRolePolicy
-              - iam:DeleteRole
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:iam::${AWS::AccountId}:role/Codebuild-Role-${AWS::Region}"
-              - !Sub "arn:aws:iam::${AWS::AccountId}:role/Codepipeline-Role-${AWS::Region}"
-              - !Sub "arn:aws:iam::${AWS::AccountId}:role/Pipeline-CFT-Role-${AWS::Region}"
-
-  AWSCodeCommitStateMachinePolicy:
     Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W13
-            reason: Usage of * allowed for Listing repositories.
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      Roles:
-        - !Ref "StateMachineRole"
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: CodeCommitAccess
-            Effect: Allow
-            Action:
-              - codecommit:CreateBranch
-              - codecommit:CreateRepository
-              - codecommit:PutFile
-              - codecommit:CreateCommit
-              - codecommit:UpdateComment
-              - codecommit:GitPull
-              - codecommit:GitPush
-            Resource:
-                - !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:*"
-
-
-  AmazonDynamoDBStateMachinePolicy:
-    Type: AWS::IAM::ManagedPolicy
+      guard:
+        SuppressedRules:
+          - IAM_POLICYDOCUMENT_NO_WILDCARD_RESOURCE
     Properties:
       Roles:
         - !Ref "StateMachineRole"
@@ -328,63 +139,186 @@ Resources:
           - Action:
               - dynamodb:PutItem
               - dynamodb:UpdateItem
-              - dynamodb:CreateTable
-              - dynamodb:DescribeTable
-              - dynamodb:UpdateTable
             Effect: Allow
-            Resource:
-              - !GetAtt DynamoDBTableStateMachine.Arn
-
-  AmazonSSMStateMachinePolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      Roles:
-        - !Ref "StateMachineRole"
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Action:
-            - ssm:PutParameter
-            Resource:
-              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:*"
-              - "arn:aws:ssm:*:*:parameter/CodeBuild/*"
-  AWSCodeBuildStateMachinePolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      Roles:
-        - !Ref "StateMachineRole"
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
+            Resource: !GetAtt DynamoDBTableStateMachine.Arn
           - Action:
-            - codebuild:UpdateProject
-            - codebuild:BatchGetBuilds
-            - codebuild:BatchGetProjects
-            - codebuild:CreateProject
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Effect: Allow
+            Resource: !GetAtt SolutionKmsKey.Arn
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub "dynamodb.${AWS::Region}.amazonaws.com"
+          - Action: lambda:InvokeFunction
+            Effect: Allow
+            Resource: !GetAtt AWSLambdaFunction.Arn
+          - Action:
+              - cloudformation:DescribeStacks
             Effect: Allow
             Resource:
-              - !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:*"
+              - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/pipeline-creation-dependencies-stack/*"
+              - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/*-Stack/*"
+          - Action:
+              - cloudformation:CreateStack
+              - cloudformation:UpdateStack
+            Effect: Allow
+            Resource:
+              - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/pipeline-creation-dependencies-stack/*"
+              - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/*-Stack/*"
+            Condition:
+              StringEquals:
+                cloudformation:TemplateUrl:
+                  - !Sub "https://${S3TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/pipeline_dependencies.yml"
+                  - !Sub "https://${S3TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/pipelinecreation_stack.yml"
+          - # These log delivery actions do not support resource-level permissions.
+            Action:
+              - logs:CreateLogDelivery
+              - logs:GetLogDelivery
+              - logs:UpdateLogDelivery
+              - logs:DeleteLogDelivery
+              - logs:ListLogDeliveries
+              - logs:PutResourcePolicy
+              - logs:DescribeResourcePolicies
+              - logs:DescribeLogGroups
+            Effect: Allow
+            Resource: "*"
 
-  AWSCloudFormationStateMachinePolicy:
+  # CloudFormation uses the permissions of the state machine role when it creates the dependencies stack and the pipeline stacks.
+  StackDeploymentPolicy:
     Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      guard:
+        SuppressedRules:
+          - IAM_POLICYDOCUMENT_NO_WILDCARD_RESOURCE
     Properties:
       Roles:
         - !Ref "StateMachineRole"
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Effect: Allow
-            Action:
-              - cloudformation:CreateUploadBucket
-              - cloudformation:DetectStackDrift
-              - cloudformation:CancelUpdateStack
-              - cloudformation:ContinueUpdateRollback
-              - cloudformation:DetectStackResourceDrift
-              - cloudformation:UpdateStack
-              - cloudformation:CreateStack
+          - Sid: ReadTemplatesAndGeneratedArtifacts
+            Action: s3:GetObject
+            Effect: Allow
             Resource:
-              - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:*"
+              - !Sub "arn:${AWS::Partition}:s3:::${S3TemplateBucketName}/pipeline_dependencies.yml"
+              - !Sub "arn:${AWS::Partition}:s3:::${S3TemplateBucketName}/pipelinecreation_stack.yml"
+              - !Sub "arn:${AWS::Partition}:s3:::${S3TemplateBucketName}/generated-artifacts/*"
+          - Sid: DeploymentArtifactBuckets
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:GetBucket*
+              - s3:PutBucket*
+              - s3:PutEncryptionConfiguration
+              - s3:GetEncryptionConfiguration
+              - s3:PutLifecycleConfiguration
+              - s3:GetLifecycleConfiguration
+            Effect: Allow
+            Resource: !Sub "arn:${AWS::Partition}:s3:::deployment-artifact-bucket*"
+          - Sid: ParametersForTheOtherStacks
+            Action:
+              - ssm:PutParameter
+              - ssm:DeleteParameter
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:AddTagsToResource
+            Effect: Allow
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/S3TemplateBucketName"
+              - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DeploymentArtifactBucketName"
+              - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/DeploymentArtifactBucketARN"
+              - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/CodePipelineServiceRoleARN"
+              - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/CodeBuildRoleARN"
+              - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/CodeBuildRoleName"
+          - Sid: PipelineRolesAndPolicies
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+              - iam:UpdateAssumeRolePolicy
+              - iam:CreatePolicy
+              - iam:DeletePolicy
+              - iam:GetPolicy
+              - iam:GetPolicyVersion
+              - iam:ListPolicyVersions
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicyVersion
+              - iam:ListEntitiesForPolicy
+            Effect: Allow
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Codebuild-Role-${AWS::Region}"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Codepipeline-Role-${AWS::Region}"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codebuild-policy-${AWS::Region}"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codepipeline-policy-${AWS::Region}"
+          - Sid: AttachOnlyThePipelinePolicies
+            Action:
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+            Effect: Allow
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Codebuild-Role-${AWS::Region}"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Codepipeline-Role-${AWS::Region}"
+            Condition:
+              ArnEquals:
+                iam:PolicyARN:
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codebuild-policy-${AWS::Region}"
+                  - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/codepipeline-policy-${AWS::Region}"
+          - Sid: PassTheRolesToTheirServices
+            Action: iam:PassRole
+            Effect: Allow
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Codebuild-Role-${AWS::Region}"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Codepipeline-Role-${AWS::Region}"
+            Condition:
+              StringEquals:
+                iam:PassedToService:
+                  - codebuild.amazonaws.com
+                  - codepipeline.amazonaws.com
+          - Sid: CodeCommitRepositories
+            Action:
+              - codecommit:CreateRepository
+              - codecommit:DeleteRepository
+              - codecommit:GetRepository
+              - codecommit:CreateBranch
+              - codecommit:CreateCommit
+              - codecommit:PutFile
+              - codecommit:GetBranch
+              - codecommit:GetFile
+              - codecommit:UpdateRepositoryDescription
+              - codecommit:TagResource
+              - codecommit:ListTagsForResource
+            Effect: Allow
+            Resource: !Sub "arn:${AWS::Partition}:codecommit:${AWS::Region}:${AWS::AccountId}:*-Repo"
+          - Sid: ListRepositories
+            # CloudFormation lists repositories when it deletes one. This action does not support resource-level permissions.
+            Action: codecommit:ListRepositories
+            Effect: Allow
+            Resource: "*"
+          - Sid: CodeBuildProjects
+            Action:
+              - codebuild:CreateProject
+              - codebuild:UpdateProject
+              - codebuild:DeleteProject
+              - codebuild:BatchGetProjects
+            Effect: Allow
+            Resource: !Sub "arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/*-Build"
+          - Sid: CodePipelinePipelines
+            Action:
+              - codepipeline:CreatePipeline
+              - codepipeline:UpdatePipeline
+              - codepipeline:DeletePipeline
+              - codepipeline:GetPipeline
+              - codepipeline:ListTagsForResource
+              - codepipeline:TagResource
+            Effect: Allow
+            Resource:
+              - !Sub "arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:*-Pipeline"
+              - !Sub "arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:*-Pipeline/*"
+              - !Sub "arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:*-Pipeline/*/*"
 
   StateMachineRole:
     Type: AWS::IAM::Role
@@ -397,14 +331,22 @@ Resources:
             Effect: Allow
             Principal:
               Service: states.amazonaws.com
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
 
   AWSLambdaFunction:
     Type: AWS::Lambda::Function
     #checkov:skip=CKV_AWS_173:By default Lambda uses an AWS KMS key that Lambda creates in your account to encrypt your environment variables
-    #checkov:skip=CKV_AWS_115:Concurrancy is not required at this level for this function
+    #checkov:skip=CKV_AWS_115:Concurrency is not required at this level for this function
     #checkov:skip=CKV_AWS_117:VPC is not required for this lambda function
     #checkov:skip=CKV_AWS_116:Dead Letter queue is not configured for this lambda function as it doesn't have any asynchronous invocations
     Metadata:
+      guard:
+        SuppressedRules:
+          - LAMBDA_INSIDE_VPC
+          - LAMBDA_DLQ_CHECK
+          - LAMBDA_CONCURRENCY_CHECK
       cfn_nag:
         rules_to_suppress:
           - id: W89
@@ -412,154 +354,101 @@ Resources:
           - id: W92
             reason: reserve simultaneous executions is not required for this function
     Properties:
-      FunctionName: "AWSLambda-Function-pipelinecreation"
-      Runtime: "python3.9"
-      Role:
-        Fn::GetAtt:
-          - AWSLambdaRole
-          - Arn
+      Runtime: "python3.13"
+      Role: !GetAtt AWSLambdaRole.Arn
       Handler: "index.lambda_handler"
       Timeout: 300
       Code:
         ZipFile: |
-          import json
-          import os
-          import boto3
-          import sys
-          import subprocess
-          from collections import OrderedDict
-          from io import BytesIO, StringIO
-          import zipfile
-          from datetime import *
-          import re
-          from zipfile import ZipFile, ZIP_DEFLATED
-          import botocore.exceptions
-          import tempfile
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: MIT-0
           import io
+          import os
+          import re
+          import textwrap
+          import zipfile
 
-          # pip install custom package to /tmp/ and add to path
-          subprocess.call("pip3 install pyyaml -t /tmp/ --no-cache-dir".split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-          sys.path.insert(1, "/tmp/")
-          import yaml
-          subprocess.call("pip3 install ruamel_yaml -t /tmp/ --no-cache-dir".split(), stdout=subprocess.DEVNULL)
-          import ruamel.yaml
-          yamll=ruamel.yaml.YAML()
-          from ruamel.yaml.comments import CommentedMap as OrderedDict
+          import boto3
+
+          s3 = boto3.client("s3")
+          BUCKET = os.environ["S3_Bucket_Name"]
+          TECH_STACKS = ("java", "python")
+          NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,40}$")
 
 
-          s3_client = boto3.client("s3")
-          s3_resource = boto3.resource("s3")
-          S3_BUCKET = os.environ["S3_Bucket_Name"]
-          codecommit = boto3.client("codecommit")
+          def fragment(key):
+            """Reads a buildspec fragment from S3 and removes the leading comment lines."""
+            body = s3.get_object(Bucket=BUCKET, Key=key)["Body"].read().decode("utf-8")
+            lines = body.splitlines()
+            while lines and (not lines[0].strip() or lines[0].lstrip().startswith(("#", "---"))):
+              lines.pop(0)
+            return textwrap.dedent("\n".join(lines)).rstrip()
+
+
+          def build_buildspec(details):
+            prefix = "input-references/" + details["tech_stack"] + "/"
+            # common.yml ends with "phases:", so the phase fragments are added below it, indented by two spaces.
+            parts = [fragment(prefix + "common.yml")]
+            phases = ["installation"]
+            phases += [p for p in ("pre_build", "build", "post_build") if details[p] == "yes"]
+            for phase in phases:
+              parts.append(textwrap.indent(fragment(prefix + phase + ".yml"), "  "))
+            if details["reports"] == "yes" and details["build"] == "yes":
+              parts.append(fragment(prefix + "reports.yml"))
+            return "\n".join(parts) + "\n"
 
 
           def lambda_handler(event, context):
-            print(event)
-            data = OrderedDict()
-            S3_PREFIX = 'input-references/'f'{event["tech_stack"]}/'
-            FINAL_ZIPPED = 'samplecode/'f'{event["tech_stack"]}/'
-            print(f'The selected tech-stack is: {event["tech_stack"]}')
-            tech_stack_event = event["tech_stack"] + '/'
-            zip_file_name = event["tech_stack"] + '-templates.zip'
-            s3_resource.Bucket(S3_BUCKET).download_file(S3_PREFIX+"common.yml", "/tmp/common.yml")
-            print (read_yaml_file("/tmp/common.yml"))
-            data.update(read_yaml_file("/tmp/common.yml"))
-            s3_resource.Bucket(S3_BUCKET).download_file(S3_PREFIX + "installation.yml", "/tmp/installation.yml")
-            data["phases"]=read_yaml_file("/tmp/installation.yml")
+            tech_stack = event.get("tech_stack")
+            project = event.get("project_name", "")
+            if tech_stack not in TECH_STACKS:
+              raise ValueError("tech_stack must be one of " + ", ".join(TECH_STACKS))
+            if not NAME_PATTERN.match(project):
+              raise ValueError("project_name must use 1 to 40 letters, numbers or hyphens")
+            for stage in ("pre_build", "build", "post_build", "reports"):
+              if event.get(stage) not in ("yes", "no"):
+                raise ValueError(stage + " must be yes or no")
 
-            if event["pre_build"] == "yes":
-                s3_resource.Bucket(S3_BUCKET).download_file(S3_PREFIX + "pre_build.yml", "/tmp/pre_build.yml")
-                data["phases"].update(read_yaml_file("/tmp/pre_build.yml"))
+            output_prefix = "generated-artifacts/" + tech_stack + "/" + project + "/"
+            buildspec = build_buildspec(event)
+            s3.put_object(Bucket=BUCKET, Key=output_prefix + "buildspec.yml", Body=buildspec.encode("utf-8"))
 
-            if event["build"] == "yes":
-                s3_resource.Bucket(S3_BUCKET).download_file(S3_PREFIX + "build.yml", "/tmp/build.yml")
-                data["phases"].update(read_yaml_file("/tmp/build.yml"))
-
-            if event["post_build"] == "yes":
-                s3_resource.Bucket(S3_BUCKET).download_file(S3_PREFIX + "post_build.yml", "/tmp/post_build.yml")
-                data["phases"].update(read_yaml_file("/tmp/post_build.yml"))
-
-            if event["reports"] == "yes" and event["build"] == "yes":
-                s3_resource.Bucket(S3_BUCKET).download_file(S3_PREFIX + "reports.yml", "/tmp/reports.yml")
-                data.update(read_yaml_file("/tmp/reports.yml"))
-
-            yaml.add_multi_constructor("", any_constructor, Loader=yaml.SafeLoader)
-            yaml.add_representer(OrderedDict, ordered_dict_representer)
-
-            write_yaml_file("/tmp/buildspec.yml", data)
-            s3_resource.Bucket(S3_BUCKET).upload_file("/tmp/buildspec.yml", FINAL_ZIPPED + "buildspec.yml")
-
-
-          #GENERATING ARTIFACT
-
-            bucket=os.environ["S3_Bucket_Name"]
-            def zipping_files(bucket, output_dir):
-                s3 = boto3.resource("s3")
-                files_to_zip = s3.Bucket(bucket).objects.filter(Prefix='samplecode/'f'{event["tech_stack"]}/')
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zipper:
-                    for file in files_to_zip:
-                        name = file.key[file.key.rfind("/") + 1:]
-                        if name != "":
-                          zipper.writestr(file.key.removeprefix(f'samplecode/{event["tech_stack"]}/'), file.get()["Body"].read())
-                boto3.client("s3").put_object(Bucket=bucket, Key=output_dir, Body=zip_buffer.getvalue())
-            zipping_files(bucket, 'generated-artifacts/'f'{event["tech_stack"]}/'f'{event["project_name"]}/'f'{event["tech_stack"]}-templates.zip')
-
+            # Zip the sample code together with the generated buildspec for the CodeCommit repository.
+            source_prefix = "samplecode/" + tech_stack + "/"
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipper:
+              zipper.writestr("buildspec.yml", buildspec)
+              for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=source_prefix):
+                for item in page.get("Contents", []):
+                  name = item["Key"][len(source_prefix):]
+                  if name and name != "buildspec.yml":
+                    zipper.writestr(name, s3.get_object(Bucket=BUCKET, Key=item["Key"])["Body"].read())
+            s3.put_object(Bucket=BUCKET, Key=output_prefix + tech_stack + "-templates.zip", Body=archive.getvalue())
             return 200
-
-          def ordered_dump(data, stream=None, Dumper=yaml.SafeDumper, **kwds):
-            class OrderedDumper(Dumper):
-                pass
-            def _dict_representer(dumper, data):
-                return dumper.represent_mapping(
-                    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-                    data.items())
-            OrderedDumper.add_representer(OrderedDict, _dict_representer)
-            return yaml.dump(data, stream, OrderedDumper, **kwds)
-
-
-          def read_yaml_file(file_path):
-            with open(file_path, "r") as stream:
-                try:
-                    data = yaml.safe_load(stream)
-                except yaml.YAMLError as exc:
-                    print(exc)
-            return data
-
-
-          def ordered_dict_representer(self, value):  # can be a lambda if that"s what you prefer
-            return self.represent_mapping("tag:yaml.org,2002:map", value.items())
-
-          def write_yaml_file(file_path, data):
-              with open(file_path, "w") as stream:
-                  try:
-                      yamll.dump(data, stream=stream)
-                  except yaml.YAMLError as exc:
-                      print(exc)
-
-
-          def any_constructor(loader, tag_suffix, node):
-            if isinstance(node, yaml.MappingNode):
-                return loader.construct_mapping(node)
-            if isinstance(node, yaml.SequenceNode):
-                return loader.construct_sequence(node)
-            return loader.construct_scalar(node)
-
-
-      Description: The function will be generating buildspec.yml file from the references.
+      Description: The function generates the buildspec.yml file from the references and zips it with the sample code.
       TracingConfig:
         Mode: Active
       Environment:
         Variables:
           S3_Bucket_Name: !Ref "S3TemplateBucketName"
 
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/vendedlogs/states/${StateMachineName}"
+      KmsKeyId: !GetAtt SolutionKmsKey.Arn
+      RetentionInDays: 30
+
   StateMachine:
     Type: AWS::StepFunctions::StateMachine
+    DependsOn:
+      - StateMachineWorkflowPolicy
     Properties:
       DefinitionString: !Sub |
         {
-          "Comment": "A description of my state machine",
+          "Comment": "Creates a CI pipeline for a Java or Python project",
           "StartAt": "Pipeline creation request received",
+          "TimeoutSeconds": 3600,
           "States": {
             "Pipeline creation request received": {
               "Type": "Task",
@@ -601,6 +490,16 @@ Resources:
                   "BackoffRate": 2
                 }
               ],
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Comment": "Record the failure",
+                  "Next": "Record failure",
+                  "ResultPath": "$.error"
+                }
+              ],
               "Next": "Check dependencies",
               "InputPath": "$.details",
               "ResultPath": null
@@ -620,7 +519,7 @@ Resources:
                     "States.TaskFailed"
                   ],
                   "Next": "Create dependencies",
-                  "Comment": "Dependencies does not exist",
+                  "Comment": "Dependencies do not exist",
                   "ResultPath": "$.input"
                 }
               ]
@@ -641,7 +540,7 @@ Resources:
                   "ErrorEquals": [
                     "States.TaskFailed"
                   ],
-                  "Comment": "No Updates",
+                  "Comment": "No updates",
                   "Next": "Check dependency status",
                   "ResultPath": "$.input"
                 }
@@ -653,12 +552,22 @@ Resources:
               "Type": "Task",
               "Parameters": {
                 "StackName": "pipeline-creation-dependencies-stack",
-                "TemplateURL":  "https://${S3TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/pipeline_dependencies.yml",
+                "TemplateURL": "https://${S3TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/pipeline_dependencies.yml",
                 "Capabilities": [
                   "CAPABILITY_NAMED_IAM"
                 ]
               },
               "Resource": "arn:aws:states:::aws-sdk:cloudformation:createStack",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Comment": "Record the failure",
+                  "Next": "Record failure",
+                  "ResultPath": "$.error"
+                }
+              ],
               "Next": "Check dependency status",
               "InputPath": "$.details",
               "ResultPath": null
@@ -680,19 +589,64 @@ Resources:
                   "Or": [
                     {
                       "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
-                      "StringEquals": "UPDATE_COMPLETE"
+                      "StringEquals": "CREATE_COMPLETE"
                     },
                     {
                       "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
-                      "StringEquals": "CREATE_COMPLETE"
+                      "StringEquals": "UPDATE_COMPLETE"
                     }
                   ],
                   "Next": "Pipeline creation Initiated"
+                },
+                {
+                  "Or": [
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "CREATE_FAILED"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "ROLLBACK_IN_PROGRESS"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "ROLLBACK_FAILED"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "ROLLBACK_COMPLETE"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "UPDATE_ROLLBACK_IN_PROGRESS"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "UPDATE_ROLLBACK_FAILED"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "UPDATE_ROLLBACK_COMPLETE"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "DELETE_IN_PROGRESS"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "DELETE_FAILED"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "DELETE_COMPLETE"
+                    }
+                  ],
+                  "Next": "Record failure"
                 }
               ],
-              "Default": "Wait for dependcy to be available"
+              "Default": "Wait for dependency to be available"
             },
-            "Wait for dependcy to be available": {
+            "Wait for dependency to be available": {
               "Type": "Wait",
               "Seconds": 5,
               "Next": "Check dependency status",
@@ -719,9 +673,9 @@ Resources:
                   }
                 }
               },
-              "Next": "Check Pipeline exists",
               "InputPath": "$.details",
-              "ResultPath": null
+              "ResultPath": null,
+              "Next": "Check Pipeline exists"
             },
             "Check Pipeline exists": {
               "Type": "Task",
@@ -736,7 +690,7 @@ Resources:
                   "ErrorEquals": [
                     "States.TaskFailed"
                   ],
-                  "Comment": "pipeline",
+                  "Comment": "The pipeline stack does not exist",
                   "Next": "Create Pipeline",
                   "ResultPath": "$.input"
                 }
@@ -748,7 +702,7 @@ Resources:
               "Next": "Check Pipeline Creation/Update status",
               "Parameters": {
                 "StackName.$": "States.Format('{}-Stack', $.project_name)",
-                "TemplateURL":  "https://${S3TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/pipelinecreation_stack.yml",
+                "TemplateURL": "https://${S3TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/pipelinecreation_stack.yml",
                 "Parameters": [
                   {
                     "ParameterKey": "TechStack",
@@ -778,7 +732,7 @@ Resources:
               "Type": "Task",
               "Parameters": {
                 "StackName.$": "States.Format('{}-Stack', $.project_name)",
-                "TemplateURL":  "https://${S3TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/pipelinecreation_stack.yml",
+                "TemplateURL": "https://${S3TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/pipelinecreation_stack.yml",
                 "Parameters": [
                   {
                     "ParameterKey": "TechStack",
@@ -793,6 +747,16 @@ Resources:
               "Resource": "arn:aws:states:::aws-sdk:cloudformation:createStack",
               "InputPath": "$.details",
               "ResultPath": null,
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Comment": "Record the failure",
+                  "Next": "Record failure",
+                  "ResultPath": "$.error"
+                }
+              ],
               "Next": "Check Pipeline Creation/Update status"
             },
             "Check Pipeline Creation/Update status": {
@@ -820,6 +784,51 @@ Resources:
                     }
                   ],
                   "Next": "Pipeline creation completed successfully"
+                },
+                {
+                  "Or": [
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "CREATE_FAILED"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "ROLLBACK_IN_PROGRESS"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "ROLLBACK_FAILED"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "ROLLBACK_COMPLETE"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "UPDATE_ROLLBACK_IN_PROGRESS"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "UPDATE_ROLLBACK_FAILED"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "UPDATE_ROLLBACK_COMPLETE"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "DELETE_IN_PROGRESS"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "DELETE_FAILED"
+                    },
+                    {
+                      "Variable": "$.pipelinestatus.Stacks[0].StackStatus",
+                      "StringEquals": "DELETE_COMPLETE"
+                    }
+                  ],
+                  "Next": "Record failure"
                 }
               ],
               "Default": "Waiting for Pipeline to be created"
@@ -851,15 +860,51 @@ Resources:
                   }
                 }
               },
-              "End": true,
               "InputPath": "$.details",
-              "ResultPath": null
+              "ResultPath": null,
+              "End": true
+            },
+            "Record failure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:updateItem",
+              "Parameters": {
+                "TableName": "${DynamoDBTable}",
+                "Key": {
+                  "techstack": {
+                    "S.$": "$.tech_stack"
+                  },
+                  "projectname": {
+                    "S.$": "$.project_name"
+                  }
+                },
+                "UpdateExpression": "SET pipelinestatus = :newval",
+                "ExpressionAttributeValues": {
+                  ":newval": {
+                    "S": "Pipeline creation failed"
+                  }
+                }
+              },
+              "InputPath": "$.details",
+              "ResultPath": null,
+              "Next": "Pipeline creation failed"
+            },
+            "Pipeline creation failed": {
+              "Type": "Fail",
+              "Error": "PipelineCreationFailed",
+              "Cause": "See the execution history and the pipeline stack events for details."
             }
           }
         }
       RoleArn: !GetAtt StateMachineRole.Arn
       StateMachineName: !Ref "StateMachineName"
       StateMachineType: STANDARD
+      LoggingConfiguration:
+        Level: ERROR
+        IncludeExecutionData: false
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+
   S3TemplateBucketNameSSMParam:
     Type: AWS::SSM::Parameter
     Properties:
@@ -868,15 +913,15 @@ Resources:
       Value: !Ref S3TemplateBucketName
       Description: Template bucket Name for the pipelines
 
-
   StatemachinePipelineDependencies:
     Type: AWS::SSM::Parameter
     Properties:
       Name: PipelineDependencyStackUrl
       Type: String
-      Value: !Join
-        - ""
-        - - "https://"
-          - !Ref S3TemplateBucketName
-          - ".s3.us-east-1.amazonaws.com/pipeline_dependencies.yml"
+      Value: !Sub "https://${S3TemplateBucketName}.s3.${AWS::Region}.amazonaws.com/pipeline_dependencies.yml"
       Description: SSM Parameter for pipeline dependency stack.
+
+Outputs:
+  StateMachineArn:
+    Description: ARN of the state machine that creates the CI pipelines
+    Value: !GetAtt StateMachine.Arn

@@ -1,7 +1,8 @@
-© 2023 Amazon Web Services, Inc. or its affiliates. All Rights Reserved.
-This work is licensed under a Creative Commons Attribution 4.0 International License.
 
 # Automated CI Pipeline Creation
+
+> **Disclaimer:** This is sample code for non-production usage. Work with your security and legal teams to meet your organizational security, regulatory and compliance requirements before deployment. See [SECURITY.md](SECURITY.md) for the services used, permissions, accepted trade-offs and clean-up steps.
+
 
 ## Summary
 
@@ -97,14 +98,14 @@ The workflow of the above architecture is as follows:
     - Create a S3 bucket for hosting the Cloud Formation templates, Source Code and input files. For the detailed instructions for creating S3 bucket refer the [documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/creating-bucket.html)
         -  Note: This can be ignored if the bucket is already available
 
-2. Clone the Code Repository from GitLab to the local workstation
-    - Copy the HTTPS/SSH URL from the same repository i.e., "aws-dlp-automated-ci-pipeline-creation"
+2. Clone the Code Repository to the local workstation
+    - Use the HTTPS URL of this repository: https://github.com/aws-samples/automated-ci-pipeline-creation.git
     - Open the terminal on your local system and run the below commands,
 
 
         -  mkdir working-directory
         -  cd working-directory
-        -  git clone < HTTPS/SSH that you copied in previous step>
+        -  git clone https://github.com/aws-samples/automated-ci-pipeline-creation.git
 
 3. Upload the Solution templates and artifacts into the S3 bucket
     - Login to the AWS Account and navigate to the S3 console.
@@ -116,7 +117,7 @@ The workflow of the above architecture is as follows:
     - Sign into the AWS Management Console and navigate to the AWS CloudFormation service console.
     - Click on **Create stack** and in the drop down select **With new resources (standard)**
     - In the next screen, under **Specify template** section select **Upload a template file**
-    - Select **Choose file** and navigate to the root folder of the cloned GitLab repository in your local workstation and select **template.yml** and click on **Open**
+    - Select **Choose file** and navigate to the root folder of the cloned repository in your local workstation and select **template.yml** and click on **Open**
     - Click **Next**
     - In the Specify stack details, provide the details,
       -  **S3TemplateBucketName** - Name of the S3 bucket to which the template zip files, source code and input files where uploaded to.
@@ -127,17 +128,25 @@ The workflow of the above architecture is as follows:
     - In the Review page **select the check box** to acknowledge and click **Create Stack**.
       -  Wait for the stack to show CREATE_COMPLETE status and the main pipeline components are now successfully
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
 ## Authors and acknowledgment
 - Aromal Raj Jayarajan
 - Amarnath Reddy Patnam
 - Mahesh Raghunandanan
 - Vijesh Vijayakumaran Nair
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+## Notes
+-   The solution supports Java and Python projects only. The sample projects use Java 17 (Amazon Corretto) and Python 3.12 on the Amazon Linux 2023 CodeBuild image (`aws/codebuild/amazonlinux-x86_64-standard:5.0`). The Java sample uses a `SecurityManager` in its tests, so it can't run on JDK 18 or later.
+-   Deploy one copy of the solution in each account and Region. The IAM role and policy names (`Codebuild-Role-<Region>` and others) are fixed because the state machine role is limited to them.
+-   The state machine accepts `tech_stack` (`java` or `python`), `project_name` (1 to 40 letters, numbers or hyphens), and `yes` or `no` for `pre_build`, `build`, `post_build` and `reports`. `reports` only applies when `build` is `yes`. If an input is not valid, or a stack fails, the execution ends in the failed state and the DynamoDB item shows "Pipeline creation failed".
+-   The generated `buildspec.yml` is stored in the template bucket under `generated-artifacts/<tech_stack>/<project_name>/`, together with a zip file of the sample code and the buildspec that seeds the CodeCommit repository.
+-   The generated pipelines only run the CI stages of your buildspec. They don't deploy anything.
+-   AWS CodeCommit is the source of the generated pipelines.
+
+## Clean up
+1. Delete the `<project_name>-Stack` CloudFormation stack of each generated pipeline.
+2. Empty the `deployment-artifact-bucket-...` bucket and the `deployment-artifact-bucket-logs-...` bucket, including all object versions (both have versioning turned on). Then delete the `pipeline-creation-dependencies-stack` stack.
+3. Delete the stack that you created from `template.yml`. The KMS key that it creates goes into a pending deletion period (30 days by default).
+4. Delete the S3 template bucket. Delete the CodeBuild report groups and CloudWatch log groups (`/aws/codebuild/<project_name>-Build`) that CodeBuild created for each project.
 
 ## Security
 
@@ -145,5 +154,5 @@ See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more inform
 
 ## License
 
-This library is licensed under the MIT-0 License. See the LICENSE file.
+This library is licensed under the MIT-0 License. See the [LICENSE](LICENSE) file.
 

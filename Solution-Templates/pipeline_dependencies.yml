@@ -1,21 +1,119 @@
-# This code launches the dependent resources for CI pipeline creation i.e., S3 bucket, IAM Roles, Policies, etc.
-# ? 2023 Amazon Web Services, Inc. or its affiliates. All Rights Reserved.
-# This AWS Content is provided subject to the terms of the AWS Customer Agreement available at
-# http://aws.amazon.com/agreement or other written agreement between Customer and either
-# Amazon Web Services, Inc. or Amazon Web Services EMEA SARL or both.
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 
+# This code launches the dependent resources for CI pipeline creation i.e., S3 buckets, IAM Roles, Policies, etc.
 AWSTemplateFormatVersion: 2010-09-09
-Description: Creation of IAM Roles & Policies for Codepipeline and Codebuild, Deployment Artifact bucket, SNS Notification topic and SSM Parameters for CSSP Pipelines
+Description: Creation of IAM Roles & Policies for Codepipeline and Codebuild, Deployment Artifact bucket and its access log bucket, and SSM Parameters.
 
 Resources:
+  # Sample-only exceptions, accepted on purpose (see SECURITY.md):
+  # - Object Lock is not turned on, because it would block the clean-up steps.
+  # - AccessControl is not set. ACLs are turned off with BucketOwnerEnforced and public access is blocked.
+  # - Cross-Region replication is not required for this sample.
+  # Receives the S3 server access logs of the deployment artifact bucket.
+  # S3 can't deliver access logs to a bucket that uses SSE-KMS, so this bucket uses SSE-S3.
+  DeploymentArtifactLogBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      guard:
+        SuppressedRules:
+          - S3_BUCKET_DEFAULT_LOCK_ENABLED
+          - S3_BUCKET_NO_PUBLIC_RW_ACL
+          - S3_BUCKET_REPLICATION_ENABLED
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Join
+        - "-"
+        - - "deployment-artifact-bucket-logs"
+          - !Select
+            - 0
+            - !Split
+              - "-"
+              - !Select
+                - 2
+                - !Split
+                  - "/"
+                  - !Ref "AWS::StackId"
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      # The log bucket logs to itself because a resource can't reference itself. The logs expire with the lifecycle rule.
+      LoggingConfiguration:
+        DestinationBucketName: !Join
+          - "-"
+          - - "deployment-artifact-bucket-logs"
+            - !Select
+              - 0
+              - !Split
+                - "-"
+                - !Select
+                  - 2
+                  - !Split
+                    - "/"
+                    - !Ref "AWS::StackId"
+        LogFilePrefix: log-bucket-logs/
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-access-logs
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  DeploymentArtifactLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DeploymentArtifactLogBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowS3ServerAccessLogs
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource:
+              - !Sub "${DeploymentArtifactLogBucket.Arn}/artifact-bucket-logs/*"
+              - !Sub "${DeploymentArtifactLogBucket.Arn}/log-bucket-logs/*"
+            Condition:
+              ArnLike:
+                aws:SourceArn:
+                  - !GetAtt DeploymentArtifactBucket.Arn
+                  - !GetAtt DeploymentArtifactLogBucket.Arn
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt DeploymentArtifactLogBucket.Arn
+              - !Sub "${DeploymentArtifactLogBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
   DeploymentArtifactBucket:
     Type: AWS::S3::Bucket
     Metadata:
-      #checkov:skip=CKV_AWS_18:Bucket logging configuration set as private
-      cfn_nag:
-        rules_to_suppress:
-          - id: W35
-            reason: Bucket logging configuration set as private
+      guard:
+        SuppressedRules:
+          - S3_BUCKET_DEFAULT_LOCK_ENABLED
+          - S3_BUCKET_NO_PUBLIC_RW_ACL
+          - S3_BUCKET_REPLICATION_ENABLED
     DeletionPolicy: Delete
     Properties:
       BucketName: !Join
@@ -30,7 +128,9 @@ Resources:
                 - !Split
                   - "/"
                   - !Ref "AWS::StackId"
-      AccessControl: Private
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -42,7 +142,9 @@ Resources:
               SSEAlgorithm: AES256
       VersioningConfiguration:
         Status: Enabled
-
+      LoggingConfiguration:
+        DestinationBucketName: !Ref DeploymentArtifactLogBucket
+        LogFilePrefix: artifact-bucket-logs/
 
   DeploymentArtifactBucketName:
     Type: AWS::SSM::Parameter
@@ -50,7 +152,7 @@ Resources:
       Name: DeploymentArtifactBucketName
       Type: String
       Value: !Ref 'DeploymentArtifactBucket'
-      Description: Deployment Artifiact bucket Name for the pipelines
+      Description: Deployment Artifact bucket Name for the pipelines
 
   DeploymentArtifactBucketARN:
     Type: AWS::SSM::Parameter
@@ -58,7 +160,7 @@ Resources:
       Name: DeploymentArtifactBucketARN
       Type: String
       Value: !GetAtt DeploymentArtifactBucket.Arn
-      Description: Deployment Artifiact bucket ARN for the pipelines
+      Description: Deployment Artifact bucket ARN for the pipelines
 
   DeploymentArtifactBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -73,26 +175,21 @@ Resources:
               - s3:GetObjectVersion
               - s3:PutObject
             Effect: Allow
-            Resource: !Join
-              - ''
-              - - !GetAtt 'DeploymentArtifactBucket.Arn'
-                - /*
+            Resource: !Sub "${DeploymentArtifactBucket.Arn}/*"
             Principal:
               AWS:
                 - !GetAtt CodeBuildRole.Arn
                 - !GetAtt CodePipelineServiceRole.Arn
-                - !GetAtt CloudFormationServiceRole.Arn
-
-          - Sid: PolicyforAllowVersioning
-            Effect: Allow
-            Principal:
-              AWS:
-                - !GetAtt CodeBuildRole.Arn
-                - !GetAtt CodePipelineServiceRole.Arn
-                - !GetAtt CloudFormationServiceRole.Arn
-            Action: s3:PutBucketVersioning
-            Resource: !GetAtt 'DeploymentArtifactBucket.Arn'
-
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt DeploymentArtifactBucket.Arn
+              - !Sub "${DeploymentArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
 
   CodeBuildPolicy:
     Type: AWS::IAM::ManagedPolicy
@@ -115,57 +212,19 @@ Resources:
               - logs:PutLogEvents
             Effect: Allow
             Resource:
-              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
-          - Action:
-              - codecommit:GitPull
-              - codecommit:ListRepositories
-              - codecommit:GetBranch
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:*"
-          - Action:
-              - s3:PutObject
-              - s3:PutBucketVersioning
-            Effect: Allow
-            Resource:
-              - !GetAtt DeploymentArtifactBucket.Arn
-              - !Join
-                - ''
-                - - !GetAtt DeploymentArtifactBucket.Arn
-                  - /*
+              - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*-Build"
+              - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*-Build:log-stream:*"
           - Action:
               - s3:GetObject
               - s3:GetObjectVersion
+              - s3:PutObject
+            Effect: Allow
+            Resource: !Sub "${DeploymentArtifactBucket.Arn}/*"
+          - Action:
+              - s3:GetBucketLocation
               - s3:ListBucket
             Effect: Allow
-            Resource:
-              - 'arn:aws:s3:::*'
-          - Action:
-              - ssm:GetParameter
-              - ssm:GetParameters
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:*"
-          - Action:
-              - iam:GetPolicy
-              - iam:ListPolicyVersions
-              - iam:GetRole
-            Effect: Allow
-            Resource:
-              - "arn:aws:iam:::*"
-          - Action:
-              - iam:PassRole
-              - iam:CreateRole
-              - iam:PutRolePolicy
-              - iam:CreatePolicy
-              - iam:AttachRolePolicy
-            Effect: Allow
-            Resource:
-              - !Sub "arn:aws:iam::${AWS::AccountId}:role/Codebuild-Role-${AWS::Region}"
-              - !Sub "arn:aws:iam::${AWS::AccountId}:role/Codepipeline-Role-${AWS::Region}"
-              - !Sub "arn:aws:iam::${AWS::AccountId}:role/Pipeline-CFT-Role-${AWS::Region}"
-              - !Sub "arn:aws:iam::${AWS::AccountId}:policy/codebuild-policy-${AWS::Region}"
-              - !Sub "arn:aws:iam::${AWS::AccountId}:policy/codepipeline-policy-${AWS::Region}"
+            Resource: !GetAtt DeploymentArtifactBucket.Arn
           - Action:
               - codebuild:CreateReportGroup
               - codebuild:CreateReport
@@ -174,9 +233,10 @@ Resources:
               - codebuild:BatchPutCodeCoverages
             Effect: Allow
             Resource:
-              - !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:*"
+              - !Sub "arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/*-Build-*"
       Roles:
         - !Ref 'CodeBuildRole'
+
   CodeBuildRole:
     Properties:
       AssumeRolePolicyDocument:
@@ -186,6 +246,9 @@ Resources:
             Effect: Allow
             Principal:
               Service: codebuild.amazonaws.com
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
       Path: /
       RoleName: !Join
         - '-'
@@ -215,19 +278,22 @@ Resources:
             Principal:
               Service:
                 - codepipeline.amazonaws.com
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
       RoleName: !Join
         - '-'
         - - 'Codepipeline-Role'
           - !Ref 'AWS::Region'
+
   CodePipelineServicePolicy:
-    # This policy orchestrates CloudFormation and CodeBuild.
+    # This policy lets the pipeline read the source repository, store artifacts and start the CodeBuild project.
     Type: AWS::IAM::ManagedPolicy
     Metadata:
       cfn_nag:
         rules_to_suppress:
           - id: W28
             reason: Explicit names are used for this policy to restrict the access of the statemachine role in the main template.
-
     Properties:
       ManagedPolicyName: !Join
         - '-'
@@ -238,38 +304,27 @@ Resources:
       PolicyDocument:
         Version: 2012-10-17
         Statement:
-          - Effect: Allow
-            Action:
-              - logs:CreateLogGroup
-              - logs:CreateLogStream
-              - logs:PutLogEvents
-            Resource: "arn:aws:logs:*:*:*"
-          - Action:
-              - s3:PutObject
-              - s3:PutBucketVersioning
-            Effect: Allow
-            Resource:
-              - !GetAtt DeploymentArtifactBucket.Arn
-              - !Join
-                - ''
-                - - !GetAtt DeploymentArtifactBucket.Arn
-                  - /*
           - Action:
               - s3:GetObject
               - s3:GetObjectVersion
+              - s3:PutObject
+            Effect: Allow
+            Resource: !Sub "${DeploymentArtifactBucket.Arn}/*"
+          - Action:
+              - s3:GetBucketLocation
+              - s3:GetBucketVersioning
               - s3:ListBucket
             Effect: Allow
-            Resource:
-              - 'arn:aws:s3:::*'
+            Resource: !GetAtt DeploymentArtifactBucket.Arn
           - Effect: Allow
             Action:
-              - codebuild:ListProjects
               - codebuild:RetryBuild
               - codebuild:StartBuild
               - codebuild:StopBuild
               - codebuild:BatchGetBuilds
+              - codebuild:BatchGetProjects
             Resource:
-              - !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:*"
+              - !Sub "arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/*-Build"
           - Effect: Allow
             Action:
               - codecommit:BatchGetCommits
@@ -280,36 +335,9 @@ Resources:
               - codecommit:GetUploadArchiveStatus
               - codecommit:GitPull
               - codecommit:ListBranches
-              - codecommit:ListRepositories
               - codecommit:UploadArchive
             Resource:
-              - !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:*"
-          - Effect: Allow
-            Action:
-              - iam:PassRole
-            Resource: !GetAtt CloudFormationServiceRole.Arn
-  CloudFormationServiceRole:
-    Type: AWS::IAM::Role
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W28
-            reason: Explicit names are used for this iam role.
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Action:
-              - sts:AssumeRole
-            Principal:
-              Service:
-                - cloudformation.amazonaws.com
-      RoleName: !Join
-        - '-'
-        - - 'Pipeline-CFT-Role'
-          - !Ref 'AWS::Region'
-
+              - !Sub "arn:${AWS::Partition}:codecommit:${AWS::Region}:${AWS::AccountId}:*-Repo"
 
   CodePipelineServiceARN:
     Type: AWS::SSM::Parameter
@@ -318,6 +346,7 @@ Resources:
       Type: String
       Value: !GetAtt CodePipelineServiceRole.Arn
       Description: SSM Parameter for storing CodePipelineServiceRole ARN
+
   CodeBuildRoleARN:
     Type: AWS::SSM::Parameter
     Properties:
@@ -325,6 +354,7 @@ Resources:
       Type: String
       Value: !GetAtt CodeBuildRole.Arn
       Description: SSM Parameter for storing CodeBuildRole ARN
+
   CodeBuildRoleName:
     Type: AWS::SSM::Parameter
     Properties:
