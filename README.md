@@ -33,17 +33,15 @@ The workflow of the above architecture is as follows:
 
 1.  A user provides the input parameters in JSON format to start execution of the Step Function.
 
-2.  Based on the provided inputs, the Lambda function reads the references which is available in S3 Bucket and it generates the BuildSpec.yaml file which is written back to the S3 Bucket.
+2.  The Lambda function validates the inputs. It then reads the reference fragments from the `input-references` folder in the S3 bucket and assembles a `buildspec.yml` file for the selected stages. The file is written back to the S3 bucket under `generated-artifacts/<tech_stack>/<project_name>/`, and it defines the stages of the CI pipeline.
 
-    This generated buildspec.yaml defines the stages of the CI Pipeline.
+3.  The Step Function checks for any creation or updates to the dependencies for the pipeline to be created and performs the required action as needed.
 
-3.  Step Function checks for any creation or updates to the dependencies for the pipeline to be created and performs the required action as needed.
+4.  The Step Function then creates the pipeline resources as a CloudFormation stack.
 
-4.  The Step Function then creates the pipeline resources as a CloudFormation stack
+5.  The sample source code for the selected technology stack, together with the generated `buildspec.yml`, is pushed into a CodeCommit repository, which the pipeline uses as its source.
 
-5.  The sample source-code for the selected technology stack along with generated buildspec.yaml file will be pushed into CodeCommit Repository which is then used by the pipeline.
-
-6.  DynamoDB will be used for storing the pipeline details and its status during the execution of the solution.
+6.  DynamoDB (encrypted with a KMS key) stores the pipeline details and status during the execution. If the input is not valid or a stack fails, the execution ends in the failed state and the item is updated to "Pipeline creation failed".
 
 ## **Tools**
 
@@ -128,6 +126,21 @@ The workflow of the above architecture is as follows:
     - In the Review page **select the check box** to acknowledge and click **Create Stack**.
       -  Wait for the stack to show CREATE_COMPLETE status and the main pipeline components are now successfully
 
+## Run the state machine
+1. Open the Step Functions console, select the state machine that you named in **StateMachineName**, and choose **Start execution**.
+2. Enter the input in JSON format, for example:
+```json
+{
+  "tech_stack": "java",
+  "project_name": "my-java-ci",
+  "pre_build": "yes",
+  "build": "yes",
+  "post_build": "yes",
+  "reports": "yes"
+}
+```
+   Use `"tech_stack": "python"` for a Python project.
+3. Wait for the execution to succeed. The generated pipeline is named `<project_name>-Pipeline`, with the CodeCommit repository `<project_name>-Repo` and the CodeBuild project `<project_name>-Build`. The pipeline has the stages `CodeCheckout` and `Build`, and it starts when the repository is created.
 ## Authors and acknowledgment
 - Aromal Raj Jayarajan
 - Amarnath Reddy Patnam
@@ -144,9 +157,9 @@ The workflow of the above architecture is as follows:
 
 ## Clean up
 1. Delete the `<project_name>-Stack` CloudFormation stack of each generated pipeline.
-2. Empty the `deployment-artifact-bucket-...` bucket and the `deployment-artifact-bucket-logs-...` bucket, including all object versions (both have versioning turned on). Then delete the `pipeline-creation-dependencies-stack` stack.
+2. Empty the `deployment-artifact-bucket-...` bucket and the `deployment-artifact-bucket-logs-...` bucket, including all object versions (both have versioning turned on). Then delete the `pipeline-creation-dependencies-stack` stack. If the deletion fails because the log bucket received new objects, empty it again and retry.
 3. Delete the stack that you created from `template.yml`. The KMS key that it creates goes into a pending deletion period (30 days by default).
-4. Delete the S3 template bucket. Delete the CodeBuild report groups and CloudWatch log groups (`/aws/codebuild/<project_name>-Build`) that CodeBuild created for each project.
+4. Delete the S3 template bucket. Delete the CodeBuild report groups and CloudWatch log groups (`/aws/codebuild/<project_name>-Build`) that CodeBuild created for each project, and the Lambda log group `/aws/lambda/<stack name>-AWSLambdaFunction-...`, which Lambda creates and the stack does not delete.
 
 ## Security
 
